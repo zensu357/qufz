@@ -120,11 +120,13 @@ logcat -s AntiFraudBlock:*
 I AntiFraudBlock: module loaded, api=102 framework=LSPosed
 I AntiFraudBlock: attach com.coloros.phonemanager
 I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiDetectStatistics -> 9 method(s) silenced
-I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils -> 2 method(s) silenced
-I AntiFraudBlock: TrackApi.E -> 1 sink hooked
+I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils -> 7 method(s) silenced
+I AntiFraudBlock: TrackApi sink -> 4 hooked
 I AntiFraudBlock: kept local: insertFraudDetectSecurityEvent / showRiskNotification / FraudRiskDialogActivity
-I AntiFraudBlock: hit silence ...AiDetectStatistics#h/3      ← 真实命中
+I AntiFraudBlock: hit silence ...AiDetectStatistics#h/3      ← 真实命中（17.1.6 实测样例）
 ```
+
+（管家 17.1.6 上 DCS 为 2、sink 为 1，`selftest.sh` 对两版都认；命中样例取自 17.1.6 实测。）
 
 ### 逃生阀
 
