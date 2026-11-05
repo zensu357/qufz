@@ -26,10 +26,12 @@ import java.util.Set;
  *        反诈埋点封装：主开关点击、事件计数、推送触达、误报反馈、VOIP 白名单外应用
  *        最终都走 vf.l.r(ctx, "20092", <event>, map) -> xf.b.d(runnable) -> TrackApi.E
  *   2. com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils
- *        m(int,String,boolean,String,String) / n(Context)
  *        云端 DCS 上报：号码、包名、通话时长、检测时长、判定码 —— 最敏感的一跳
- *   3. com.oplus.nearx.track.TrackApi.E(String appId, String event, Map params)
- *        appId="20092"，全部手机管家遥测的最终出口
+ *        方法名随管家版本变（17.1.6 = m/n，16.17.3 混淆成 a~h），按 "static void" 全匹配；
+ *        非 void（16.x a(String)->J 是 callId 时间戳映射）不动
+ *   3. com.oplus.nearx.track.TrackApi
+ *        appId="20092"，全部手机管家遥测的最终出口；sink 即 (String,String,Map)->V
+ *        三参方法，17.1.6 叫 E、16.17.3 改名 O —— 按签名定位，不按方法名硬编码
  *
  * 保留不动（本地功能必须照常）：
  *   RiskWarningUtilsKt.insertFraudDetectSecurityEvent      -> 本地反诈记录落库
@@ -85,14 +87,13 @@ public class MainHook extends XposedModule {
         hookStaticVoid(cl,
                 "com.oplus.phonemanager.aivoicecalldetect.utils.AiDetectStatistics", null);
 
-        // 2) DCS 云端上报：只打 m(...) 与 n(Context)
-        Set<String> dcs = new HashSet<>();
-        dcs.add("m");
-        dcs.add("n");
+        // 2) DCS 云端上报：全部 static void 短路（17.x 的 m/n、16.x 的 b~h 全覆盖；
+        //    返回 J 的 a(String) 是 callId 时间戳映射，不是 void，天然排除）
         hookStaticVoid(cl,
-                "com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils", dcs);
+                "com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils", null);
 
-        // 3) 最终出口兜底：TrackApi.E(appId="20092", 反诈事件, map) 直接吞
+        // 3) 最终出口兜底：TrackApi 的 (String,String,Map)->V sink（17.x=E，16.x=O），
+        //    appId="20092" 且事件名命中黑名单的直接吞
         hookTrackSink(cl);
 
         log("kept local: insertFraudDetectSecurityEvent / showRiskNotification / FraudRiskDialogActivity");
@@ -123,15 +124,20 @@ public class MainHook extends XposedModule {
             Class<?> c = Class.forName(cls, false, cl);
             int hit = 0;
             for (Method m : c.getDeclaredMethods()) {
-                if (!"E".equals(m.getName())) continue;
                 Class<?>[] ps = m.getParameterTypes();
-                if (ps.length != 3) continue;
+                // sink 按形状找：17.x = E(String,String,Map)，16.x = N/O/P/Q 一族
+                // （Map / JSONObject / 两参三种重载）。统一按"前两参 String 且返回 void"匹配，
+                // 事件过滤在 intercept 里做，误伤不了别的 appId
+                if (ps.length < 2) continue;
                 if (ps[0] != String.class || ps[1] != String.class) continue;
-                final boolean nullResult = m.getReturnType() == void.class;
-                hookMethod(m, "sink TrackApi.E", nullResult ? null : false);
+                if (m.getReturnType() != void.class) continue;
+                StringBuilder shape = new StringBuilder("(");
+                for (Class<?> p : ps) shape.append(p.getSimpleName()).append(",");
+                shape.setCharAt(shape.length() - 1, ')');
+                hookMethod(m, "sink TrackApi#" + m.getName() + shape, null);
                 hit++;
             }
-            log("TrackApi.E -> " + hit + " sink hooked");
+            log("TrackApi sink -> " + hit + " hooked");
         } catch (Throwable t) {
             log("hook TrackApi failed: " + t);
         }
@@ -147,13 +153,14 @@ public class MainHook extends XposedModule {
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     if (sDisabled) return chain.proceed();
                     if (always == null) {
-                        // TrackApi.E 的判定分支
+                        // TrackApi sink 判定分支：appId="20092" + 事件名命中黑名单才吞
+                        // （16.x 同一事件会串行穿过 O->P->Q，在 O 层吞掉后下两层不再触发）
                         Object appId = chain.getArg(0);
                         Object ev = chain.getArg(1);
                         if (ev instanceof String
                                 && TRACK_APP_ID.equals(String.valueOf(appId))
                                 && isBlockedEvent((String) ev)) {
-                            log("blocked track event: " + ev);
+                            log("blocked track event: " + ev + " [" + label + "]");
                             return null;
                         }
                         return chain.proceed();
