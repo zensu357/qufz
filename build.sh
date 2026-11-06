@@ -14,7 +14,7 @@ set -e
 cd "$(dirname "$0")"
 
 OUT_DIR=${1:-out}
-VER=2.0
+VER=2.1
 
 SDK=${ANDROID_SDK:-/opt/android-sdk}
 BT="$SDK/build-tools/36.0.0"

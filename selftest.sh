@@ -24,14 +24,21 @@ info(){ printf '       %s\n' "$1"; }
 FAILED=0
 
 say "A. 装配检查"
-if "$LSPCTL" module show com.eta.afb 2>/dev/null | grep -q 'User 0: enabled'; then
+# lspctl 只有开了 LSPosed 开发者模式才输出模块状态；看不到时降级为提示，以日志装配为准
+LSP_SHOW=$("$LSPCTL" module show com.eta.afb 2>/dev/null)
+if echo "$LSP_SHOW" | grep -q 'User 0: enabled'; then
   ok "模块已启用"
+elif [ -z "$LSP_SHOW" ] || ! echo "$LSP_SHOW" | grep -q 'User 0:'; then
+  info "lspctl 无法确认模块状态（未开开发者模式），以冷启动日志装配为准"
 else
   bad "模块未启用（LSPosed → 反诈上报阻断 → 启用 + 勾手机管家）"
 fi
 
-if "$LSPCTL" scope list com.eta.afb 2>/dev/null | grep -q "$PKG"; then
+LSP_SCOPE=$("$LSPCTL" scope list com.eta.afb 2>/dev/null)
+if echo "$LSP_SCOPE" | grep -q "$PKG"; then
   ok "作用域含 $PKG"
+elif [ -z "$LSP_SCOPE" ] || ! echo "$LSP_SCOPE" | grep -qE '[0-9]+  '; then
+  info "lspctl 无法确认作用域（未开开发者模式），以冷启动日志装配为准"
 else
   bad "作用域缺 $PKG"
 fi
@@ -57,8 +64,20 @@ done
 
 echo "$LOG" | grep -q 'module loaded'            && ok "module loaded"                     || bad "未见 module loaded（模块没注入）"
 echo "$LOG" | grep -q 'AiDetectStatistics -> 9'  && ok "AiDetectStatistics 9 个方法已静默" || bad "AiDetectStatistics hook 缺失"
-echo "$LOG" | grep -q 'AiVoiceDetectDCSUtils -> 2' && ok "AiVoiceDetectDCSUtils 2 个方法已静默" || bad "DCS 上报 hook 缺失"
-echo "$LOG" | grep -q 'TrackApi.E -> 1 sink hooked' && ok "TrackApi.E 出口已挂" || bad "TrackApi.E 未挂"
+# v2.0 日志是 "TrackApi.E -> 1 sink hooked"，v2.1 是 "TrackApi sink -> N hooked"，两种都认
+SINK_N=$(echo "$LOG" | grep -oE 'TrackApi\.E -> [0-9]+ sink hooked|TrackApi sink -> [0-9]+ hooked' | grep -oE '[0-9]+' | head -1)
+if [ -n "${SINK_N:-}" ] && [ "$SINK_N" -ge 1 ]; then
+  ok "TrackApi 出口已挂（$SINK_N 个 sink；17.x=E/1，16.x=N~Q/4）"
+else
+  bad "TrackApi 出口未挂"
+fi
+# DCS 静音数随版本变：17.x 只拦 m/n 共 2 个，16.x 全量 static void 是 7 个，>=2 即装配成功
+DCS_N=$(echo "$LOG" | grep -o 'AiVoiceDetectDCSUtils -> [0-9]* method(s) silenced' | grep -oE '[0-9]+' | head -1)
+if [ -n "${DCS_N:-}" ] && [ "$DCS_N" -ge 2 ]; then
+  ok "AiVoiceDetectDCSUtils ${DCS_N} 个方法已静默（17.x=2，16.x=7）"
+else
+  bad "DCS 上报 hook 缺失"
+fi
 echo "$LOG" | grep -q 'hook class failed' && bad "有类 hook 失败（版本不匹配？看下方原文）" && echo "$LOG" | grep 'hook class failed' | info
 [ "$FAILED" = "0" ] && info "全部 3 处 hook 就位"
 
@@ -77,7 +96,7 @@ if [ "${1:-}" = "--active" ]; then
   BLOCKED=$(logcat -d 2>/dev/null | grep 'AntiFraudBlock.*blocked track event' | grep -v 'LSPosedFramework' | wc -l)
   info "sink 层吞掉的 TrackApi 事件：$BLOCKED 条"
   if [ "$BLOCKED" = "0" ]; then
-    info "（为 0 说明反诈埋点在 AiDetectStatistics 层就被挡在源头，根本没走到 TrackApi.E，属正常）"
+    info "（为 0 说明反诈埋点在 AiDetectStatistics / DCS 层就被挡在源头，根本没走到 TrackApi sink，属正常）"
   fi
 fi
 

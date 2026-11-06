@@ -6,6 +6,7 @@
 
 ```text
 com.coloros.phonemanager 17.1.6 · ColorOS 16 · Android 16 · RMX5200
+com.coloros.phonemanager 16.17.3 · ColorOS 16 · Android 16 · RMX3850   ← v2.1 适配
 ```
 
 ---
@@ -48,6 +49,34 @@ ai_detect_voip_app_outside_lists
 
 外加前缀兜底：`anti_fraud*` / `ai_detect*` / `fraud*`，用于接住后续版本新增的事件名。
 
+### 16.17.3 与 17.1.6 的差异（v2.1 实测）
+
+管家版本升级会整体重排混淆名，v2.1 起所有 hook 点改为**按形状匹配**，不再按方法名硬编码：
+
+| Hook 点 | 17.1.6 | 16.17.3 | v2.1 匹配规则 |
+|---|---|---|---|
+| `AiDetectStatistics` | static void：`b/c/d/e/f/g/h/i/j` 共 9 个 | 字母相同、签名变了，仍是 9 个 static void | 类内全部 `static void`（`a(ZZZ)String` 排除） |
+| `AiVoiceDetectDCSUtils` | `m(...)` / `n(Context)` | 混淆成 `a~h`，无 `m/n` | 类内全部 `static void`（7 个；`a(String)->J` 是 callId 时间戳映射，非 void 自动排除） |
+| `TrackApi` sink | `E(String,String,Map)` | `N/O/P/Q` 一族，`E` 变成无关的 `E()->Z` | 任意前两参 `String` 且返回 `void` 的方法 |
+
+16.17.3 关键链路（jadx-free 用 dex 调用图实测）：
+
+```text
+开关上报:  ExaminationStatisticsUtilsKt.b → DCSUtils.h(Context)   (=17.x uploadSwitches)
+           → he.v.W → he.l.run → he.v.p → he.v.z
+           → TrackApi.O("20092","ai_detect_switch_event",{master_switch,app_switch})
+检测结果:  SimCallDetectManager / VoipCallDetectManager
+           → DCSUtils.b/c/d/e/f/g        (=17.x uploadDetectInfo 一族，带号码)
+本地弹窗:  FraudRiskDialogActivity.R2 → DCSUtils.f   (弹窗顺带往云端报，拦掉不影响本地)
+```
+
+遥测门面：17.1.6 是 `vf.l`，16.17.3 是 `he.v`（两者 dex 字符串里都带 `Statistics` 标记）。sink 在 16.x 是
+**O→P→Q 链式调用**（同一个事件串行穿过三个重载），拦住 `O` 一层即断流，`N/O/P/Q` 全钩是兜底。
+
+16.17.3 的事件名也换了一套：`ai_detect_switch_event`、`ai_detect_fraud`、`ai_detect_result_fraud_call_calling/hangup`、
+`ai_detect_result_fraud_voip_*`、`fraud_event` 等 —— 全部被 `ai_detect*` / `fraud*` 前缀覆盖；17.1.6 的
+`anti_fraud_*` 六个在该版本不存在，精确表保留以兼容新版本。
+
 ### 三层为什么都拦
 
 - 只拦 `AiDetectStatistics` → 漏掉 `SimCallDetectManager` / `VoipCallDetectTriggerReceiver` 直接调 `AiVoiceDetectDCSUtils.m(...)` 的那条（这条带**手机号**，最敏感）。
@@ -66,14 +95,14 @@ ai_detect_voip_app_outside_lists
 
 ## 安装
 
-1. 安装 `release/AntiFraudBlock-2.0.apk`
+1. 安装 `release/AntiFraudBlock-2.1.apk`
 2. LSPosed 里启用，作用域勾 **手机管家（com.coloros.phonemanager）**
 3. 强停手机管家后重新打开（`am force-stop com.coloros.phonemanager`）
 
 命令行装 + 验证：
 
 ```bash
-adb install -r AntiFraudBlock-2.0.apk
+adb install -r AntiFraudBlock-2.1.apk
 
 # LSPosed 2.2.0 起有 lspctl，可直接核对状态
 /data/adb/modules/zygisk_lsposed/lspctl module show com.eta.afb
@@ -91,11 +120,13 @@ logcat -s AntiFraudBlock:*
 I AntiFraudBlock: module loaded, api=102 framework=LSPosed
 I AntiFraudBlock: attach com.coloros.phonemanager
 I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiDetectStatistics -> 9 method(s) silenced
-I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils -> 2 method(s) silenced
-I AntiFraudBlock: TrackApi.E -> 1 sink hooked
+I AntiFraudBlock: com.oplus.phonemanager.aivoicecalldetect.utils.AiVoiceDetectDCSUtils -> 7 method(s) silenced
+I AntiFraudBlock: TrackApi sink -> 4 hooked
 I AntiFraudBlock: kept local: insertFraudDetectSecurityEvent / showRiskNotification / FraudRiskDialogActivity
-I AntiFraudBlock: hit silence ...AiDetectStatistics#h/3      ← 真实命中
+I AntiFraudBlock: hit silence ...AiDetectStatistics#h/3      ← 真实命中（17.1.6 实测样例）
 ```
+
+（管家 17.1.6 上 DCS 为 2、sink 为 1，`selftest.sh` 对两版都认；命中样例取自 17.1.6 实测。）
 
 ### 逃生阀
 
@@ -167,10 +198,18 @@ AFB_KS=~/afb-release.jks AFB_KS_PASS=xxx AFB_KS_ALIAS=afb AFB_KS_KEYPASS=xxx ./b
 
 | | 证书 DN | 证书 SHA-256 |
 |---|---|---|
-| `release/` 正式包 | `CN=AntiFraudBlock, O=ETA, C=CN` | `46d15cd9…32d5c1` |
+| `release/` 正式包（v2.1 起） | `CN=AntiFraudBlock, O=ETA, C=CN` | `c2649496…18d932` |
+| v2.0 的旧正式包 | 同上 DN，旧密钥 | `46d15cd9…32d5c1` |
 | `./build.sh` 默认 | `C=US, O=Android, CN=Android Debug` | `b0d023e8…36faa2` |
 
-两者**签名不同，不能互相覆盖安装**。装过 `release/` 包的机器装重建版要先 `adb uninstall com.eta.afb`，重装后在 LSPosed 里重新勾作用域。
+> v2.1 重新签发了正式密钥（原 keystore 不可用，DN 保持一致）。**v2.1 与 v2.0 正式包签名不同，
+> 不能互相覆盖安装**：从 v2.0 正式包升级要先 `adb uninstall com.eta.afb`，重装后在 LSPosed 里重新勾作用域。
+
+新 keystore 不入库（`~/afb-release.jks`），构建时用环境变量指定：
+
+```bash
+AFB_KS=~/afb-release.jks AFB_KS_PASS=xxx AFB_KS_ALIAS=afb AFB_KS_KEYPASS=xxx ./build.sh release
+```
 
 目录：
 
@@ -194,14 +233,15 @@ docs/REVERSING.md             逆向取证记录
 
 ## 版本
 
-- **v2.0**（当前）libxposed API 102 / `XposedModule` modern 形态。LSPosed 自动识别、`xposedscope` 由 `META-INF/xposed/scope.list` 静态声明。
+- **v2.1**（当前）适配 PhoneManager 16.17.3：DCS 层改全量 `static void`、TrackApi sink 改按形状匹配 `N/O/P/Q` 一族，不再依赖混淆方法名。实测装配 `9 silenced / 7 silenced / 4 hooked`。正式密钥重签（DN 不变，见上文签名说明）。
+- **v2.0** libxposed API 102 / `XposedModule` modern 形态。LSPosed 自动识别、`xposedscope` 由 `META-INF/xposed/scope.list` 静态声明。仅适配 17.1.6。
 - **v1.0**（废弃）legacy `IXposedHookLoadPackage` + `api-82.jar`。装上去 LSPosed 认成 legacy 模块，`User 0: disabled`，需手动启用且 hook 不生效。留作对照，别用。
 
 ---
 
 ## 已知边界
 
-- 只在 RMX5200 / ColorOS 16 / 手机管家 17.1.6 实测。ColorOS 版本差异会导致类名变动 —— 类名变了就去 `logcat -s AntiFraudBlock:*` 看 `hook class failed`，用 jadx 重新对一遍 `aivoicecalldetect.utils.*`。
+- 只在 RMX5200（管家 17.1.6）与 RMX3850（管家 16.17.3）/ ColorOS 16 实测。ColorOS 版本差异会导致混淆名重排 —— v2.1 的匹配规则已与名字解耦，类名变了就去 `logcat -s AntiFraudBlock:*` 看 `hook class failed` / `0 silenced`，用 jadx 重新对一遍 `aivoicecalldetect.utils.*`。
 - 拦的是**手机管家自身**的上报。第三方 App 通过其他通道上报的数据不在范围内。
 - `TrackApi.E` 是通用的，本模块只吞 `appId == "20092"` 且事件名命中前缀的那些，其他 appId 的事件照常走。
 - 手机管家后续版本如果改走 native 上报或换 SDK，需要重新逆向，本模块的 java 层 hook 会失效（但不会导致崩溃，只是拦不住）。
